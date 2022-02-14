@@ -1,163 +1,84 @@
-OBJS = \
-	bio.o\
-	console.o\
-	exec.o\
-	file.o\
-	fs.o\
-	ide.o\
-	ioapic.o\
-	kalloc.o\
-	kbd.o\
-	lapic.o\
-	log.o\
-	main.o\
-	mp.o\
-	picirq.o\
-	pipe.o\
-	proc.o\
-	sleeplock.o\
-	spinlock.o\
-	string.o\
-	swtch.o\
-	syscall.o\
-	sysfile.o\
-	sysproc.o\
-	trapasm.o\
-	trap.o\
-	uart.o\
-	vectors.o\
-	vm.o\
+include Makefile.toolchain
 
-# Cross-compiling (e.g., on Mac OS X)
-# TOOLPREFIX = i386-jos-elf
+bin/%.c.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+	@$(OBJDUMP) -S $@ > $@.asm
 
-# Using native tools (e.g., on X86 Linux)
-#TOOLPREFIX = 
+bin/%.S.o: %.S
+	@mkdir -p $(dir $@)
+	$(CC) $(ASFLAGS) -c -o $@ $<
 
-# Try to infer the correct TOOLPREFIX if not set
-ifndef TOOLPREFIX
-TOOLPREFIX := $(shell if i386-jos-elf-objdump -i 2>&1 | grep '^elf32-i386$$' >/dev/null 2>&1; \
-	then echo 'i386-jos-elf-'; \
-	elif objdump -i 2>&1 | grep 'elf32-i386' >/dev/null 2>&1; \
-	then echo ''; \
-	else echo "***" 1>&2; \
-	echo "*** Error: Couldn't find an i386-*-elf version of GCC/binutils." 1>&2; \
-	echo "*** Is the directory with i386-jos-elf-gcc in your PATH?" 1>&2; \
-	echo "*** If your i386-*-elf toolchain is installed with a command" 1>&2; \
-	echo "*** prefix other than 'i386-jos-elf-', set your TOOLPREFIX" 1>&2; \
-	echo "*** environment variable to that prefix and run 'make' again." 1>&2; \
-	echo "*** To turn off this error, run 'gmake TOOLPREFIX= ...'." 1>&2; \
-	echo "***" 1>&2; exit 1; fi)
-endif
+SRCS = kernel/entry.S $(filter-out kernel/entry.S kernel/vectors.S, $(wildcard kernel/*.S)) \
+       $(wildcard kernel/*.c) kernel/vectors.S
+OBJS = $(patsubst %,bin/%.o,$(filter-out kernel/memide.c, $(SRCS)))
+MEMFSOBJS = $(patsubst %,bin/%.o,$(filter-out kernel/ide.c, $(SRCS)))
 
-# If the makefile can't find QEMU, specify its path here
-# QEMU = qemu-system-i386
+xv6.img: bin/bootblock bin/kernel.elf
+	dd if=/dev/zero of=$@ count=10000
+	dd if=bin/bootblock of=$@ conv=notrunc
+	dd if=bin/kernel.elf of=$@ seek=1 conv=notrunc
 
-# Try to infer the correct QEMU
-ifndef QEMU
-QEMU = $(shell if which qemu > /dev/null; \
-	then echo qemu; exit; \
-	elif which qemu-system-i386 > /dev/null; \
-	then echo qemu-system-i386; exit; \
-	elif which qemu-system-x86_64 > /dev/null; \
-	then echo qemu-system-x86_64; exit; \
-	else \
-	qemu=/Applications/Q.app/Contents/MacOS/i386-softmmu.app/Contents/MacOS/i386-softmmu; \
-	if test -x $$qemu; then echo $$qemu; exit; fi; fi; \
-	echo "***" 1>&2; \
-	echo "*** Error: Couldn't find a working QEMU executable." 1>&2; \
-	echo "*** Is the directory containing the qemu binary in your PATH" 1>&2; \
-	echo "*** or have you tried setting the QEMU variable in Makefile?" 1>&2; \
-	echo "***" 1>&2; exit 1)
-endif
+xv6memfs.img: bin/bootblock bin/kernelmemfs.elf
+	dd if=/dev/zero of=$@ count=10000
+	dd if=bin/bootblock of=$@ conv=notrunc
+	dd if=bin/kernelmemfs.elf of=$@ seek=1 conv=notrunc
 
-CC = $(TOOLPREFIX)gcc
-AS = $(TOOLPREFIX)gas
-LD = $(TOOLPREFIX)ld
-OBJCOPY = $(TOOLPREFIX)objcopy
-OBJDUMP = $(TOOLPREFIX)objdump
-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
-CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
-ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
-# FreeBSD ld wants ``elf_i386_fbsd''
-LDFLAGS += -m $(shell $(LD) -V | grep elf_i386 2>/dev/null | head -n 1)
+bin/kernel.elf: $(OBJS) bin/entryother bin/initcode kernel/kernel.ld
+	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $@ $(OBJS) -b binary bin/initcode bin/entryother
+	$(OBJDUMP) -S $@ > $@.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $@.sym
 
-# Disable PIE when possible (for Ubuntu 16.10 toolchain)
-ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
-CFLAGS += -fno-pie -no-pie
-endif
-ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]nopie'),)
-CFLAGS += -fno-pie -nopie
-endif
+bin/entryother: ASFLAGS=$(CFLAGS)
+bin/entryother: $(patsubst %,bin/%.o,$(wildcard kernel/entry/*))
+	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7000 -o $@.o $<
+	$(OBJCOPY) -S -O binary -j .text $@.o $@
+	$(OBJDUMP) -S $@.o > $@.asm
 
-xv6.img: bootblock kernel
-	dd if=/dev/zero of=xv6.img count=10000
-	dd if=bootblock of=xv6.img conv=notrunc
-	dd if=kernel of=xv6.img seek=1 conv=notrunc
+bin/initcode: ASFLAGS=$(CFLAGS)
+bin/initcode: $(patsubst %,bin/%.o,$(wildcard kernel/init/*))
+	$(LD) $(LDFLAGS) -N -e start -Ttext 0 -o $@.out $^
+	$(OBJCOPY) -S -O binary -j .text $@.out $@
 
-xv6memfs.img: bootblock kernelmemfs
-	dd if=/dev/zero of=xv6memfs.img count=10000
-	dd if=bootblock of=xv6memfs.img conv=notrunc
-	dd if=kernelmemfs of=xv6memfs.img seek=1 conv=notrunc
+bin/bootblock: ASFLAGS=$(CFLAGS)  -O -nostdinc
+bin/bootblock: CFLAGS:=$(CFLAGS)  -O -nostdinc
+bin/bootblock: AS=$(CC)
+bin/bootblock: $(patsubst %,bin/%.o,$(wildcard kernel/boot/*))
+	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7C00 -o $@.o $^  
+	$(OBJDUMP) -S $@.o > $@.asm
+	$(OBJCOPY) -S -O binary -j .text $@.o $@
+	./tools/sign.pl $@
 
-bootblock: bootasm.S bootmain.c
-	$(CC) $(CFLAGS) -fno-pic -O -nostdinc -I. -c bootmain.c
-	$(CC) $(CFLAGS) -fno-pic -nostdinc -I. -c bootasm.S
-	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7C00 -o bootblock.o bootasm.o bootmain.o
-	$(OBJDUMP) -S bootblock.o > bootblock.asm
-	$(OBJCOPY) -S -O binary -j .text bootblock.o bootblock
-	./sign.pl bootblock
 
-entryother: entryother.S
-	$(CC) $(CFLAGS) -fno-pic -nostdinc -I. -c entryother.S
-	$(LD) $(LDFLAGS) -N -e start -Ttext 0x7000 -o bootblockother.o entryother.o
-	$(OBJCOPY) -S -O binary -j .text bootblockother.o entryother
-	$(OBJDUMP) -S bootblockother.o > entryother.asm
-
-initcode: initcode.S
-	$(CC) $(CFLAGS) -nostdinc -I. -c initcode.S
-	$(LD) $(LDFLAGS) -N -e start -Ttext 0 -o initcode.out initcode.o
-	$(OBJCOPY) -S -O binary initcode.out initcode
-	$(OBJDUMP) -S initcode.o > initcode.asm
-
-kernel: $(OBJS) entry.o entryother initcode kernel.ld
-	$(LD) $(LDFLAGS) -T kernel.ld -o kernel entry.o $(OBJS) -b binary initcode entryother
-	$(OBJDUMP) -S kernel > kernel.asm
-	$(OBJDUMP) -t kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > kernel.sym
-
-# kernelmemfs is a copy of kernel that maintains the
+# bin/kernelmemfs is a copy of kernel that maintains the
 # disk image in memory instead of writing to a disk.
 # This is not so useful for testing persistent storage or
 # exploring disk buffering implementations, but it is
 # great for testing the kernel on real hardware without
 # needing a scratch disk.
-MEMFSOBJS = $(filter-out ide.o,$(OBJS)) memide.o
-kernelmemfs: $(MEMFSOBJS) entry.o entryother initcode kernel.ld fs.img
-	$(LD) $(LDFLAGS) -T kernel.ld -o kernelmemfs entry.o  $(MEMFSOBJS) -b binary initcode entryother fs.img
-	$(OBJDUMP) -S kernelmemfs > kernelmemfs.asm
-	$(OBJDUMP) -t kernelmemfs | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > kernelmemfs.sym
+bin/kernelmemfs.elf: $(MEMFSOBJS) bin/entryother bin/initcode kernel/kernel.ld fs.img
+	$(LD) $(LDFLAGS) -T kernel/kernel.ld -o $@ $(MEMFSOBJS) -b binary bin/initcode bin/entryother fs.img
+	$(OBJDUMP) -S $@ > $@.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $@.sym
 
-tags: $(OBJS) entryother.S _init
-	etags *.S *.c
+kernel/vectors.S: tools/vectors.pl
+	./tools/vectors.pl > $@
 
-vectors.S: vectors.pl
-	./vectors.pl > vectors.S
+ULIB = $(patsubst %,bin/%.o,$(wildcard lib/*))
 
-ULIB = ulib.o usys.o printf.o umalloc.o
-
-_%: %.o $(ULIB)
+bin/_%: bin/user/%.c.o $(ULIB)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $^
-	$(OBJDUMP) -S $@ > $*.asm
-	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $*.sym
+	$(OBJDUMP) -S $@ > bin/$*.asm
+	$(OBJDUMP) -t $@ | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > bin/$*.sym
 
-_forktest: forktest.o $(ULIB)
+bin/_forktest: bin/user/forktest.c.o $(ULIB)
 	# forktest has less library code linked in - needs to be small
 	# in order to be able to max out the proc table.
-	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o _forktest forktest.o ulib.o usys.o
-	$(OBJDUMP) -S _forktest > forktest.asm
+	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $@ $< bin/lib/ulib.c.o bin/lib/usys.S.o
+	$(OBJDUMP) -S $@ > bin/$*.asm
 
-mkfs: mkfs.c fs.h
-	gcc -Werror -Wall -o mkfs mkfs.c
+tools/mkfs: tools/mkfs.c include/fs.h
+	gcc -Werror -Wall -iquoteinclude -o $@ $<
 
 # Prevent deletion of intermediate files, e.g. cat.o, after first build, so
 # that disk image changes after first build are persistent until clean.  More
@@ -165,44 +86,17 @@ mkfs: mkfs.c fs.h
 # http://www.gnu.org/software/make/manual/html_node/Chained-Rules.html
 .PRECIOUS: %.o
 
-UPROGS=\
-	_cat\
-	_echo\
-	_forktest\
-	_grep\
-	_init\
-	_kill\
-	_ln\
-	_ls\
-	_mkdir\
-	_rm\
-	_sh\
-	_stressfs\
-	_usertests\
-	_wc\
-	_zombie\
+UPROGS=$(patsubst user/%.c,bin/_%,$(wildcard user/*.c))
 
-fs.img: mkfs README $(UPROGS)
-	./mkfs fs.img README $(UPROGS)
+fs.img: tools/mkfs README $(UPROGS)
+	./tools/mkfs fs.img README $(UPROGS)
 
 -include *.d
 
 clean: 
-	rm -f *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
-	*.o *.d *.asm *.sym vectors.S bootblock entryother \
-	initcode initcode.out kernel xv6.img fs.img kernelmemfs \
-	xv6memfs.img mkfs .gdbinit \
-	$(UPROGS)
-
-# make a printout
-FILES = $(shell grep -v '^\#' runoff.list)
-PRINT = runoff.list runoff.spec README toc.hdr toc.ftr $(FILES)
-
-xv6.pdf: $(PRINT)
-	./runoff
-	ls -l xv6.pdf
-
-print: xv6.pdf
+	rm -rf *.tex *.dvi *.idx *.aux *.log *.ind *.ilg \
+	*.d kernel/vectors.S bin xv6.img fs.img \
+	bin/kernelmemfs xv6memfs.img tools/mkfs .gdbinit 
 
 # run in emulators
 
