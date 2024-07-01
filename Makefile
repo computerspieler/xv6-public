@@ -55,7 +55,7 @@ bin/user/forktest: bin/user/forktest.c.o $(ULIB)
 	$(OBJDUMP) -S $@ > bin/$*.asm
 
 tools/mkfs: tools/mkfs.c include/fs.h
-	gcc -Werror -Wall -iquoteinclude -o $@ $<
+	gcc -Werror -m32 -Wall -iquoteinclude -o $@ $<
 
 UPROGS=$(patsubst %.c,bin/%,$(wildcard user/*.c))
 
@@ -79,7 +79,8 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 ifndef CPUS
 CPUS := 2
 endif
-QEMUOPTS = -drive file=fs.img,index=1,media=disk,format=raw -smp $(CPUS) -m 512 $(QEMUEXTRA)
+QEMUOPTS = -drive file=fs.img,format=raw,if=ide,index=1,media=disk \
+	-smp $(CPUS) -m 512M $(QEMUEXTRA)
 
 qemu: bin/kernel.elf fs.img 
 	$(QEMU) -kernel $< -serial mon:stdio $(QEMUOPTS)
